@@ -6,12 +6,16 @@
  * @see https://manuelvanrijn.nl/blog/2012/01/18/convert-postgresql-to-sqlite/
  */
 
-$dsn_source = $argv[1];
-$dsn_source = $argv[1];
-$dsn_target = $argv[2];
+error_reporting((E_ALL|E_STRICT) & ~E_NOTICE);
 
-$dbc_source = new SQL($dsn_source);
-$dbc_target = new SQL($dsn_target);
+$opt = getopt('', [
+	'source:',
+	'target:',
+	'filter:', // Filter Table Names
+]);
+
+$dbc_source = new SQL($opt['source']);
+$dbc_target = new SQL($opt['target']);
 
 
 // Get Schema From Source
@@ -56,6 +60,7 @@ foreach ($res_schema as $obj) {
 		$obj['col_type'] = 'BLOB';
 		break;
 	default:
+		echo "TYPE: {$obj['col_type']}\n";
 		$obj['col_type'] = 'TEXT';
 		break;
 	}
@@ -70,6 +75,7 @@ foreach ($res_schema as $obj) {
 
 }
 ksort($out_schema);
+var_dump($out_schema);
 
 // Spin Discovered Schema
 foreach ($out_schema as $tab_name => $tab_spec) {
