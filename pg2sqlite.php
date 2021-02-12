@@ -46,6 +46,9 @@ foreach ($res_schema as $obj) {
 		$out_schema[$tab] = [
 			'name' => $tab,
 			'column_list' => [],
+			'SELECT' => '',
+			'INSERT' => '',
+			'FK' => [],
 		];
 	}
 
@@ -66,6 +69,7 @@ foreach ($res_schema as $obj) {
 		break;
 	case 'json':
 	case 'jsonb':
+	case 'tsvector':
 		$obj['col_type'] = 'BLOB';
 		break;
 	case 'numeric':
@@ -87,6 +91,34 @@ foreach ($res_schema as $obj) {
 
 }
 ksort($out_schema);
+
+
+// Load Foreign Keys
+$sql = <<<SQL
+SELECT
+	tc.table_name, kcu.column_name, tc.constraint_name,
+	ccu.table_name AS foreign_table_name,
+	ccu.column_name AS foreign_column_name
+FROM
+	information_schema.table_constraints AS tc
+	LEFT JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name
+	LEFT JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name
+WHERE constraint_type = 'FOREIGN KEY'
+ORDER BY 1, 2, 3, 4, 5
+SQL;
+
+$res = $dbc_source->query($sql)->fetchAll();
+foreach ($res as $rec) {
+
+	$t = $rec['table_name'];
+	$c = $rec['column_name'];
+
+	$out_schema[$t]['FK'][$c] = [
+		't' => $rec['foreign_table_name'],
+		'c' => $rec['foreign_column_name'],
+	];
+
+}
 
 
 // Filter some Out?
@@ -126,6 +158,14 @@ foreach ($out_schema as $tab_name => $tab_spec) {
 		$sel_text[] = $col_name;
 		$ins_text[] = '?'; // @todo Named Params
 	}
+
+	// Append Foreign Keys
+	if (!empty($tab_spec['FK'])) {
+		foreach ($tab_spec['FK'] as $col_name => $col_spec) {
+			$col_text[] = sprintf('FOREIGN KEY (%s) REFERENCES %s(%s)', $col_name, $col_spec['t'], $col_spec['c']);
+		}
+	}
+
 	$col_text = implode(",\n  ", $col_text);
 	$sel_text = implode(', ', $sel_text);
 	$ins_text = implode(', ', $ins_text);
@@ -140,6 +180,7 @@ foreach ($out_schema as $tab_name => $tab_spec) {
 	$out_schema[$tab_name]['INSERT'] = $ins_text;
 
 }
+
 
 // Import the Data
 foreach ($out_schema as $tab_name => $tab_spec) {
