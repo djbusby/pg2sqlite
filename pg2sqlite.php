@@ -8,15 +8,14 @@
 
 error_reporting((E_ALL|E_STRICT) & ~E_NOTICE);
 
-$opt = getopt('', [
-	'source:',
-	'target:',
-	'filter:', // Filter Table Names
-]);
+$opt = _cli_option_parse();
 
 $dbc_source = new SQL($opt['source']);
-$dbc_target = new SQL($opt['target']);
 
+// $src_schema = _source_schema_load($dbc_source);
+// $src_schema = _source_schmea_filter($src_schema, $opt);
+// _target_create($dbc_target, $)
+// _target_insert($dbc_source, $dbc_target, $xxx);
 
 // Get Schema From Source
 $sql = <<<SQL
@@ -51,13 +50,26 @@ foreach ($res_schema as $obj) {
 	}
 
 	// Remap Datatype
-	switch ($obj['col_type']) {
+	$col_type = $obj['col_type'];
+	$col_type = preg_replace('/\(.+\)/', '', $col_type);
+	switch ($col_type) {
+	case 'bigint':
 	case 'integer':
 		$obj['col_type'] = 'INTEGER';
+		break;
+	case 'character':
+	case 'character varying':
+	case 'date':
+	case 'text':
+	case 'timestamp with time zone':
+		$obj['col_type'] = 'TEXT';
 		break;
 	case 'json':
 	case 'jsonb':
 		$obj['col_type'] = 'BLOB';
+		break;
+	case 'numeric':
+		$obj['col_type'] = 'REAL';
 		break;
 	default:
 		echo "TYPE: {$obj['col_type']}\n";
@@ -75,7 +87,28 @@ foreach ($res_schema as $obj) {
 
 }
 ksort($out_schema);
-var_dump($out_schema);
+
+
+// Filter some Out?
+if (!empty($opt['filter'])) {
+	$del_list = [];
+	foreach ($out_schema as $tab_name => $tab_spec) {
+		if (!preg_match($opt['filter'], $tab_name)) {
+			$del_list[] = $tab_name;
+		}
+	}
+	// var_dump($del_list);
+	foreach ($del_list as $x) {
+		unset($out_schema[$x]);
+	}
+}
+
+// Create Output
+$dbc_target = new SQL($opt['target']);
+// This makes Sqlite "faster" (but less safe)
+$dbc_target->query('PRAGMA journal_mode = OFF');
+$dbc_target->query('PRAGMA synchronous = OFF');
+
 
 // Spin Discovered Schema
 foreach ($out_schema as $tab_name => $tab_spec) {
@@ -98,46 +131,60 @@ foreach ($out_schema as $tab_name => $tab_spec) {
 	$ins_text = implode(', ', $ins_text);
 
 	// Create Table
-	$sql_create = "CREATE TABLE $tab_name ($col_text)";
-	echo "$sql_create\n";
-	//$dbc_target->query($sql_create);
+	$sql_create = "CREATE TABLE $tab_name (\n  $col_text\n);";
+	// echo "$sql_create\n";
+	$dbc_target->query($sql_create);
 
-	// Prepare insert statement
-	$sql_target = "INSERT INTO $tab_name VALUES ($ins_text)";
-	$res_insert = $dbc_target->prepare($sql_target);
-
-	// Copy Data
-	// @todo use the CURSOR Format
-	do {
-
-		$add = 0;
-		$lim = 100000;
-
-		// Get all source data
-		// $sql_source = "SELECT $sel_text FROM $tab_name ORDER BY 1 OFFSET $idx LIMIT $lim";
-		$sql_source = "SELECT $sel_text FROM $tab_name ORDER BY 1 OFFSET $idx";
-		echo "$sql_source\n";
-
-		$res_source = $dbc_source->query($sql_source);
-
-		// $dbc_target->query('BEGIN');
-
-		while ($rec_source = $res_source->fetch(\PDO::FETCH_NUM)) {
-
-			$add++;
-			$idx++;
-
-			$res_insert->execute($rec_source);
-
-		}
-
-		// $dbc_target->query('COMMIT');
-
-	} while ($add > 0);
+	// Modify out_schema with SELECT and INSERT data-helper
+	$out_schema[$tab_name]['SELECT'] = $sel_text;
+	$out_schema[$tab_name]['INSERT'] = $ins_text;
 
 }
 
-// SQL Helper
+// Import the Data
+foreach ($out_schema as $tab_name => $tab_spec) {
+
+	$idx_insert = 0;
+
+	// Prepare insert statement
+	$sql_select = sprintf('DECLARE _pg_dump_cursor CURSOR FOR SELECT * FROM ONLY %s', $tab_name);
+	$sql_insert = "INSERT INTO $tab_name VALUES ({$tab_spec['INSERT']});";
+	echo "INSERT: $sql_insert\n";
+
+	$dbc_source->query('BEGIN');
+	$cur_select = $dbc_source->prepare($sql_select);
+	$cur_select->execute();
+
+	$res_select = $dbc_source->prepare('FETCH 1000 FROM _pg_dump_cursor');
+	$res_insert = $dbc_target->prepare($sql_insert);
+
+	$res_select->execute();
+	while ($res_select->rowCount() > 0) {
+
+		printf("INSERT: $idx_insert + %d\t\r", $res_select->rowCount());
+
+		// Not sure if these transactions affect the already prepared statement
+		// $dbc_target->query('BEGIN');
+		foreach ($res_select as $rec_source) {
+			$idx_insert++;
+			$rec_source = array_values($rec_source);
+			$res_insert->execute($rec_source);
+		}
+		// $dbc_target->query('COMMIT');
+
+		$res_select->execute();
+
+	};
+
+	$dbc_source->query('ROLLBACK');
+
+	echo "\nINSERT: $idx_insert RECORDS\n";
+}
+
+
+/**
+ * SQL Helper Class
+ */
 class SQL extends \PDO
 {
 	function __construct($dsn=null, $user=null, $pass=null, $opts=null)
@@ -147,6 +194,40 @@ class SQL extends \PDO
 		$this->setAttribute(\PDO::ATTR_CASE, \PDO::CASE_NATURAL);
 		$this->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 		$this->setAttribute(\PDO::ATTR_ORACLE_NULLS, \PDO::NULL_EMPTY_STRING);
-
 	}
+}
+
+/**
+ * Parse Command Line Options
+ * @return Array Options
+ */
+function _cli_option_parse()
+{
+	$opt = getopt('', [
+		'source:',
+		'output:',
+		'filter:', // Filter to INCLUDE ONLY these Table Names
+	]);
+
+	if (empty($opt['source'])) {
+		echo "You must provide --source=DSN\n";
+		exit(1);
+	}
+
+	if (empty($opt['output'])) {
+		$opt['target'] = sprintf('sqlite:%s/OUTPUT-%s.sqlite', __DIR__, date('YmdHis'));
+		printf("WARN: Using Default Output: %s\n", basename($opt['target']));
+	}
+
+	// Check Filter
+	if (!empty($opt['filter'])) {
+		$x = preg_match($opt['filter'], 'TEST STRING NEVER MATCH');
+		$e = preg_last_error();
+		if (!empty($e)) {
+			echo "Your Regular Expression in --filter is not valid\n";
+			exit(1);
+		}
+	}
+
+	return $opt;
 }
