@@ -135,6 +135,7 @@ if (!empty($opt['filter'])) {
 	}
 }
 
+
 // Create Output
 $dbc_target = new SQL($opt['target']);
 // This makes Sqlite "faster" (but less safe)
@@ -202,7 +203,7 @@ foreach ($out_schema as $tab_name => $tab_spec) {
 	$res_select->execute();
 	while ($res_select->rowCount() > 0) {
 
-		printf("INSERT: $idx_insert + %d\t\r", $res_select->rowCount());
+		printf("INSERT: $idx_insert + %d...\r", $res_select->rowCount());
 
 		// Not sure if these transactions affect the already prepared statement
 		// $dbc_target->query('BEGIN');

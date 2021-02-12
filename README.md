@@ -12,7 +12,7 @@ It converts a PostgreSQL database to Sqlite.
 ```shell
 ./pg2sqlite.php \
   --source=pgsql:DSN \
-  --target=sqlite:DSN \
+  --output=sqlite:DSN \
   --filter=/regular-expression/
 ```
 
